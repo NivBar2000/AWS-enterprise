@@ -59,3 +59,27 @@ resource "aws_route_table" "ad_private" {
     Tier = "AD"
   }
 }
+resource "aws_route_table_association" "ad_a_to_ad_private" {
+  subnet_id      = aws_subnet.ad_a.id
+  route_table_id = aws_route_table.ad_private.id
+}
+resource "aws_route_table_association" "ad_b_to_ad_private" {
+  subnet_id      = aws_subnet.ad_b.id
+  route_table_id = aws_route_table.ad_private.id
+}
+resource "aws_route_table" "employee_private" {
+  vpc_id = aws_vpc.enterprise.id
+
+  tags = {
+    Name = "enterprise-employee-private-rt"
+    Tier = "Employee"
+  }
+}
+resource "aws_route_table_association" "employee_a_to_employee_private" {
+  subnet_id      = aws_subnet.employee_a.id
+  route_table_id = aws_route_table.employee_private.id
+}
+resource "aws_route_table_association" "employee_b_to_employee_private" {
+  subnet_id      = aws_subnet.employee_b.id
+  route_table_id = aws_route_table.employee_private.id
+}
