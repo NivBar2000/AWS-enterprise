@@ -1,0 +1,167 @@
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+$DirectorySecretId = "${directory_secret_arn}"
+$EmployeeSecretId = "${employee_secret_arn}"
+$AwsRegion = "${aws_region}"
+
+Import-Module ActiveDirectory
+
+Write-Output "Reading credentials from AWS Secrets Manager"
+
+$DirectorySecretJson = (
+    Get-SECSecretValue `
+        -SecretId $DirectorySecretId `
+        -Region $AwsRegion
+).SecretString
+
+$EmployeeSecretJson = (
+    Get-SECSecretValue `
+        -SecretId $EmployeeSecretId `
+        -Region $AwsRegion
+).SecretString
+
+$DirectorySecret = $DirectorySecretJson | ConvertFrom-Json
+$EmployeeSecret = $EmployeeSecretJson | ConvertFrom-Json
+
+$AdminSecurePassword = ConvertTo-SecureString `
+    $DirectorySecret.password `
+    -AsPlainText `
+    -Force
+
+$AdminUsername = "$($DirectorySecret.username)@$($DirectorySecret.domain)"
+
+$AdminCredential = New-Object `
+    System.Management.Automation.PSCredential `
+    ($AdminUsername, $AdminSecurePassword)
+
+$DomainName = $DirectorySecret.domain
+
+$DomainDn = (
+    $DomainName.Split(".") |
+    ForEach-Object { "DC=$_" }
+) -join ","
+
+$DepartmentsOuDn = "OU=Departments,$DomainDn"
+
+Write-Output "Ensuring the Departments OU exists"
+
+$DepartmentsOu = Get-ADOrganizationalUnit `
+    -LDAPFilter "(ou=Departments)" `
+    -SearchBase $DomainDn `
+    -SearchScope OneLevel `
+    -Server $DomainName `
+    -Credential $AdminCredential
+
+if ($null -eq $DepartmentsOu) {
+    New-ADOrganizationalUnit `
+        -Name "Departments" `
+        -Path $DomainDn `
+        -ProtectedFromAccidentalDeletion $false `
+        -Server $DomainName `
+        -Credential $AdminCredential
+}
+
+$Employees = foreach ($Property in $EmployeeSecret.PSObject.Properties) {
+    [PSCustomObject]@{
+        Username   = $Property.Name
+        Password   = $Property.Value.password
+        Department = $Property.Value.department
+        GroupName  = $Property.Value.group_name
+    }
+}
+
+$DepartmentNames = $Employees.Department | Sort-Object -Unique
+
+foreach ($DepartmentName in $DepartmentNames) {
+    $DepartmentOuDn = "OU=$DepartmentName,$DepartmentsOuDn"
+
+    Write-Output "Configuring department: $DepartmentName"
+
+    $DepartmentOu = Get-ADOrganizationalUnit `
+        -LDAPFilter "(ou=$DepartmentName)" `
+        -SearchBase $DepartmentsOuDn `
+        -SearchScope OneLevel `
+        -Server $DomainName `
+        -Credential $AdminCredential
+
+    if ($null -eq $DepartmentOu) {
+        New-ADOrganizationalUnit `
+            -Name $DepartmentName `
+            -Path $DepartmentsOuDn `
+            -ProtectedFromAccidentalDeletion $false `
+            -Server $DomainName `
+            -Credential $AdminCredential
+    }
+
+    $GroupName = (
+        $Employees |
+        Where-Object Department -eq $DepartmentName |
+        Select-Object -First 1
+    ).GroupName
+
+    $Group = Get-ADGroup `
+        -LDAPFilter "(sAMAccountName=$GroupName)" `
+        -SearchBase $DepartmentOuDn `
+        -Server $DomainName `
+        -Credential $AdminCredential
+
+    if ($null -eq $Group) {
+        New-ADGroup `
+            -Name $GroupName `
+            -SamAccountName $GroupName `
+            -GroupScope Global `
+            -GroupCategory Security `
+            -Path $DepartmentOuDn `
+            -Server $DomainName `
+            -Credential $AdminCredential
+    }
+
+    $DepartmentEmployees = $Employees |
+        Where-Object Department -eq $DepartmentName
+
+    foreach ($Employee in $DepartmentEmployees) {
+        $ExistingUser = Get-ADUser `
+            -LDAPFilter "(sAMAccountName=$($Employee.Username))" `
+            -SearchBase $DepartmentOuDn `
+            -Server $DomainName `
+            -Credential $AdminCredential
+
+        if ($null -eq $ExistingUser) {
+            Write-Output "Creating user: $($Employee.Username)"
+
+            $EmployeePassword = ConvertTo-SecureString `
+                $Employee.Password `
+                -AsPlainText `
+                -Force
+
+            New-ADUser `
+                -Name $Employee.Username `
+                -DisplayName $Employee.Username `
+                -SamAccountName $Employee.Username `
+                -UserPrincipalName "$($Employee.Username)@$DomainName" `
+                -Path $DepartmentOuDn `
+                -AccountPassword $EmployeePassword `
+                -Enabled $true `
+                -ChangePasswordAtLogon $true `
+                -Server $DomainName `
+                -Credential $AdminCredential
+        }
+
+        $ExistingMembership = Get-ADGroupMember `
+            -Identity $GroupName `
+            -Server $DomainName `
+            -Credential $AdminCredential |
+            Where-Object SamAccountName -eq $Employee.Username
+
+        if ($null -eq $ExistingMembership) {
+            Add-ADGroupMember `
+                -Identity $GroupName `
+                -Members $Employee.Username `
+                -Server $DomainName `
+                -Credential $AdminCredential
+        }
+    }
+}
+
+Write-Output "Active Directory organization configuration completed"

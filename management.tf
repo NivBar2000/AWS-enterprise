@@ -34,6 +34,30 @@ resource "aws_iam_role_policy_attachment" "management_directory_access" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMDirectoryServiceAccess"
 }
 
+resource "aws_iam_role_policy" "management_secrets_read" {
+  name = "enterprise-management-secrets-read"
+  role = aws_iam_role.management_server.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+
+    Statement = [
+      {
+        Effect = "Allow"
+
+        Action = [
+          "secretsmanager:GetSecretValue"
+        ]
+
+        Resource = [
+          aws_secretsmanager_secret.directory_admin.arn,
+          aws_secretsmanager_secret.employee_credentials.arn
+        ]
+      }
+    ]
+  })
+}
+
 resource "aws_iam_instance_profile" "management_server" {
   name = "enterprise-management-server-profile"
   role = aws_iam_role.management_server.name
@@ -87,7 +111,9 @@ resource "aws_instance" "management_server" {
     aws_vpc_dhcp_options_association.enterprise,
     aws_route.employee_internet,
     aws_iam_role_policy_attachment.management_ssm_core,
-    aws_iam_role_policy_attachment.management_directory_access
+    aws_iam_role_policy_attachment.management_directory_access,
+    aws_iam_role_policy.management_secrets_read
+
   ]
 
   tags = {
@@ -115,4 +141,52 @@ resource "aws_ssm_association" "management_server_domain_join" {
   }
 
   wait_for_success_timeout_seconds = 1800
+}
+resource "aws_ssm_association" "management_server_rsat" {
+  name = "AWS-RunPowerShellScript"
+
+  targets {
+    key = "InstanceIds"
+    values = [
+      aws_instance.management_server.id
+    ]
+  }
+
+  parameters = {
+    commands = "Install-WindowsFeature -Name RSAT-AD-Tools -IncludeAllSubFeature; Install-WindowsFeature -Name GPMC; Install-WindowsFeature -Name RSAT-DNS-Server"
+  }
+
+  wait_for_success_timeout_seconds = 1800
+
+  depends_on = [
+    aws_ssm_association.management_server_domain_join
+  ]
+}
+resource "aws_ssm_association" "configure_active_directory" {
+  name = "AWS-RunPowerShellScript"
+
+  targets {
+    key = "InstanceIds"
+
+    values = [
+      aws_instance.management_server.id
+    ]
+  }
+
+  parameters = {
+    commands = templatefile("${path.module}/scripts/configure-ad.ps1.tftpl", {
+      directory_secret_arn = aws_secretsmanager_secret.directory_admin.arn
+      employee_secret_arn  = aws_secretsmanager_secret.employee_credentials.arn
+      aws_region           = "eu-central-1"
+    })
+  }
+
+  wait_for_success_timeout_seconds = 1800
+
+  depends_on = [
+    aws_ssm_association.management_server_rsat,
+    aws_secretsmanager_secret_version.directory_admin,
+    aws_secretsmanager_secret_version.employee_credentials,
+    aws_iam_role_policy.management_secrets_read
+  ]
 }
