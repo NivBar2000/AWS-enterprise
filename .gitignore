@@ -31,3 +31,7 @@ override.tf.json
 # Windows temporary files
 Thumbs.db
 Desktop.ini
+
+# Draw.io temporary and backup files
+*.bkp
+*.dtmp
