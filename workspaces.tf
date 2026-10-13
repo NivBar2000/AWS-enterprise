@@ -63,3 +63,55 @@ resource "aws_workspaces_directory" "enterprise" {
     Name = "enterprise-workspaces-directory"
   }
 }
+resource "aws_kms_key" "workspaces" {
+  description             = "KMS key for enterprise employee WorkSpaces"
+  enable_key_rotation     = true
+  deletion_window_in_days = 7
+
+  tags = {
+    Name = "enterprise-workspaces-key"
+  }
+}
+
+resource "aws_kms_alias" "workspaces" {
+  name          = "alias/enterprise-workspaces"
+  target_key_id = aws_kms_key.workspaces.key_id
+}
+data "aws_workspaces_bundle" "employee_windows" {
+  bundle_id = "wsb-fb2xfp6r8"
+}
+
+resource "aws_workspaces_workspace" "employee" {
+  for_each = local.employees
+
+  directory_id = aws_workspaces_directory.enterprise.id
+  bundle_id    = data.aws_workspaces_bundle.employee_windows.id
+  user_name    = each.key
+
+  root_volume_encryption_enabled = true
+  user_volume_encryption_enabled = true
+  volume_encryption_key          = aws_kms_key.workspaces.arn
+
+  workspace_properties {
+    compute_type_name                         = "VALUE"
+    root_volume_size_gib                      = 80
+    user_volume_size_gib                      = 10
+    running_mode                              = "AUTO_STOP"
+    running_mode_auto_stop_timeout_in_minutes = 60
+  }
+
+  tags = {
+    Name       = "enterprise-workspace-${each.key}"
+    User       = each.key
+    Department = each.value.department
+  }
+
+  depends_on = [
+    aws_ssm_association.configure_active_directory
+  ]
+
+  timeouts {
+    create = "60m"
+    delete = "30m"
+  }
+}
